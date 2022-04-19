@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.9;
+pragma solidity 0.8.10;
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
@@ -12,7 +12,7 @@ contract MockETHStrategy is ERC20("Mock cEther Strategy", "cEther", 18), ETHStra
     using FixedPointMathLib for uint256;
 
     /*///////////////////////////////////////////////////////////////
-                           STRATEGY FUNCTIONS
+                             STRATEGY LOGIC
     //////////////////////////////////////////////////////////////*/
 
     function isCEther() external pure override returns (bool) {
@@ -20,11 +20,11 @@ contract MockETHStrategy is ERC20("Mock cEther Strategy", "cEther", 18), ETHStra
     }
 
     function mint() external payable override {
-        _mint(msg.sender, msg.value.fdiv(exchangeRate(), 1e18));
+        _mint(msg.sender, msg.value.divWadDown(exchangeRate()));
     }
 
     function redeemUnderlying(uint256 amount) external override returns (uint256) {
-        _burn(msg.sender, amount.fdiv(exchangeRate(), 1e18));
+        _burn(msg.sender, amount.divWadDown(exchangeRate()));
 
         msg.sender.safeTransferETH(amount);
 
@@ -32,11 +32,11 @@ contract MockETHStrategy is ERC20("Mock cEther Strategy", "cEther", 18), ETHStra
     }
 
     function balanceOfUnderlying(address user) external view override returns (uint256) {
-        return balanceOf[user].fmul(exchangeRate(), 1e18);
+        return balanceOf[user].mulDivDown(exchangeRate(), 1e18);
     }
 
     /*///////////////////////////////////////////////////////////////
-                             INTERNAL LOGIC
+                            INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
     function exchangeRate() internal view returns (uint256) {
@@ -44,11 +44,11 @@ contract MockETHStrategy is ERC20("Mock cEther Strategy", "cEther", 18), ETHStra
 
         if (cTokenSupply == 0) return 1e18;
 
-        return address(this).balance.fdiv(cTokenSupply, 1e18);
+        return address(this).balance.divWadDown(cTokenSupply);
     }
 
     /*///////////////////////////////////////////////////////////////
-                             MOCK FUNCTIONS
+                              MOCK LOGIC
     //////////////////////////////////////////////////////////////*/
 
     function simulateLoss(uint256 underlyingAmount) external {

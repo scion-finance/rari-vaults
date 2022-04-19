@@ -1,41 +1,67 @@
-// SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.9;
+// SPDX-License-Identifier: AGPL-3.0
+pragma solidity >=0.8.0;
 
-import {ERC20} from "solmate/tokens/ERC20.sol";
-import {Auth, Authority} from "solmate/auth/Auth.sol";
-import {Bytes32AddressLib} from "solmate/utils/Bytes32AddressLib.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import {Bytes32AddressLib} from "../libraries/Bytes32AddressLib.sol";
 
-import {Vault} from "./Vault.sol";
+import "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
+import "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 
-/// @title Rari Vault Factory
-/// @author Transmissions11 and JetJadeja
-/// @notice Factory which enables deploying a Vault contract for any ERC20 token.
-contract VaultFactory is Auth(msg.sender, Authority(address(0))) {
+// import "hardhat/console.sol";
+
+/// @title Scion Vault Factory
+/// @author 0x0scion (based on Rari Vault Factory)
+/// @notice Upgradable beacon factory which enables deploying a deterministic Vault for ERC20 token.
+contract ScionVaultFactory is Ownable {
     using Bytes32AddressLib for address;
     using Bytes32AddressLib for bytes32;
 
-    /*///////////////////////////////////////////////////////////////
-                                 EVENTS
-    //////////////////////////////////////////////////////////////*/
+    // ======== Immutable storage ========
+    // @notice Upgrades are handled seprately via beacon
+    UpgradeableBeacon immutable beacon;
 
-    /// @notice Emitted when a new Vault is deployed.
-    /// @param vault The newly deployed Vault contract.
-    /// @param underlying The underlying token the new Vault accepts.
-    event VaultDeployed(Vault vault, ERC20 underlying);
+    /*///////////////////////////////////////////////////////////////
+                               CONSTRUCTOR
+  //////////////////////////////////////////////////////////////*/
+
+    /// @notice Creates a Vault factory.
+    constructor(UpgradeableBeacon beacon_) Ownable() {
+        beacon = beacon_;
+    }
+
+    function implementation() external view returns (address) {
+        return beacon.implementation();
+    }
 
     /*///////////////////////////////////////////////////////////////
                           VAULT DEPLOYMENT LOGIC
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Emitted when a new Vault is deployed.
+    /// @param vault The newly deployed Vault contract.
+    /// @param underlying The underlying token the new Vault accepts.
+    event VaultDeployed(BeaconProxy vault, IERC20 underlying);
+
     /// @notice Deploys a new Vault which supports a specific underlying token.
     /// @dev This will revert if a Vault that accepts the same underlying token has already been deployed.
     /// @param underlying The ERC20 token that the Vault should accept.
+    /// @param id We may have different vaults w different credit ratings for the same asset
     /// @return vault The newly deployed Vault contract which accepts the provided underlying token.
-    function deployVault(ERC20 underlying) external returns (Vault vault) {
+    function deployVault(
+        IERC20 underlying,
+        uint256 id,
+        bytes memory _callData
+    ) external onlyOwner returns (BeaconProxy vault) {
         // Use the CREATE2 opcode to deploy a new Vault contract.
         // This will revert if a Vault which accepts this underlying token has already
         // been deployed, as the salt would be the same and we can't deploy with it twice.
-        vault = new Vault{salt: address(underlying).fillLast12Bytes()}(underlying);
+
+        vault = new BeaconProxy{salt: address(underlying).fillLast12Bytes() | bytes32(id)}(
+            address(beacon),
+            "" // call initialization method separately to ensure address is not impacted
+        );
+        Address.functionCall(address(vault), _callData);
 
         emit VaultDeployed(vault, underlying);
     }
@@ -46,11 +72,12 @@ contract VaultFactory is Auth(msg.sender, Authority(address(0))) {
 
     /// @notice Computes a Vault's address from its accepted underlying token.
     /// @param underlying The ERC20 token that the Vault should accept.
+    /// @param id We may have different vaults w different credit ratings for the same asset
     /// @return The address of a Vault which accepts the provided underlying token.
     /// @dev The Vault returned may not be deployed yet. Use isVaultDeployed to check.
-    function getVaultFromUnderlying(ERC20 underlying) external view returns (Vault) {
+    function getVaultFromUnderlying(IERC20 underlying, uint256 id) external view returns (BeaconProxy) {
         return
-            Vault(
+            BeaconProxy(
                 payable(
                     keccak256(
                         abi.encodePacked(
@@ -59,14 +86,14 @@ contract VaultFactory is Auth(msg.sender, Authority(address(0))) {
                             // Creator:
                             address(this),
                             // Salt:
-                            address(underlying).fillLast12Bytes(),
+                            address(underlying).fillLast12Bytes() | bytes32(id),
                             // Bytecode hash:
                             keccak256(
                                 abi.encodePacked(
                                     // Deployment bytecode:
-                                    type(Vault).creationCode,
+                                    type(BeaconProxy).creationCode,
                                     // Constructor arguments:
-                                    abi.encode(underlying)
+                                    abi.encode(address(beacon), "")
                                 )
                             )
                         )
@@ -80,7 +107,7 @@ contract VaultFactory is Auth(msg.sender, Authority(address(0))) {
     /// @return A boolean indicating whether the Vault has been deployed already.
     /// @dev This function is useful to check the return values of getVaultFromUnderlying,
     /// as it does not check that the Vault addresses it computes have been deployed yet.
-    function isVaultDeployed(Vault vault) external view returns (bool) {
-        return address(vault).code.length > 0;
+    function isVaultDeployed(address vault) external view returns (bool) {
+        return vault.code.length > 0;
     }
 }

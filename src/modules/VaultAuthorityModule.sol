@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.9;
+pragma solidity 0.8.10;
 
 import {Auth, Authority} from "solmate/auth/Auth.sol";
 
@@ -8,24 +8,12 @@ import {Auth, Authority} from "solmate/auth/Auth.sol";
 /// @author Modified from Solmate (https://github.com/Rari-Capital/solmate/blob/main/src/auth/authorities/RolesAuthority.sol)
 contract VaultAuthorityModule is Auth, Authority {
     /*///////////////////////////////////////////////////////////////
-                                  EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    event TargetCustomAuthorityUpdated(address indexed target, Authority indexed authority);
-
-    event UserRootUpdated(address indexed user, bool enabled);
-
-    event UserRoleUpdated(address indexed user, uint8 indexed role, bool enabled);
-
-    event RoleCapabilityUpdated(uint8 indexed role, bytes4 indexed functionSig, bool enabled);
-
-    /*///////////////////////////////////////////////////////////////
                                CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Creates a Vault configuration module.
     /// @param _owner The owner of the module.
-    /// @param _authority The authority of the module.
+    /// @param _authority The Authority of the module.
     constructor(address _owner, Authority _authority) Auth(_owner, _authority) {}
 
     /*///////////////////////////////////////////////////////////////
@@ -33,24 +21,14 @@ contract VaultAuthorityModule is Auth, Authority {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Maps targets to a custom Authority to use for authorization.
-    mapping(address => Authority) public getCustomAuthority;
+    mapping(address => Authority) public getTargetCustomAuthority;
 
     /*///////////////////////////////////////////////////////////////
                              USER ROLE STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Maps users to a boolean indicating whether they have root access.
-    mapping(address => bool) public isUserRoot;
-
     /// @notice Maps users to a bytes32 set of all the roles assigned to them.
     mapping(address => bytes32) public getUserRoles;
-
-    /*///////////////////////////////////////////////////////////////
-                        ROLE CAPABILITY STORAGE
-    //////////////////////////////////////////////////////////////*/
-
-    /// @dev Maps function signature to a set of all roles that can call the given function.
-    mapping(bytes4 => bytes32) public getRoleCapabilities;
 
     /// @notice Gets whether a user has a specific role.
     /// @param user The user to check for.
@@ -66,45 +44,72 @@ contract VaultAuthorityModule is Auth, Authority {
         }
     }
 
-    /// @notice Returns if a user can call a given Vault's function.
+    /*///////////////////////////////////////////////////////////////
+                        ROLE CAPABILITY STORAGE
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Maps function signatures to a set of all roles that can call the given function.
+    mapping(bytes4 => bytes32) public getRoleCapabilities;
+
+    /// @notice Maps function signatures to a boolean indicating whether anyone can call the given function.
+    mapping(bytes4 => bool) public isCapabilityPublic;
+
+    /// @notice Gets whether a role has a specific capability.
+    /// @param role The role to check for.
+    /// @param functionSig function to check the role is capable of calling.
+    /// @return A boolean indicating whether the role has the capability.
+    function doesRoleHaveCapability(uint8 role, bytes4 functionSig) external view virtual returns (bool) {
+        unchecked {
+            // Generate a mask for the role.
+            bytes32 shifted = bytes32(uint256(uint256(2)**uint256(role)));
+
+            // Check if the role has the capability using the generated mask.
+            return bytes32(0) != getRoleCapabilities[functionSig] & shifted;
+        }
+    }
+
+    /*///////////////////////////////////////////////////////////////
+                          AUTHORIZATION LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Returns if a user can call a given target's function.
     /// @param user The user to check for.
-    /// @param target The Vault the user is trying to call.
+    /// @param target The target the user is trying to call.
     /// @param functionSig The function signature the user is trying to call.
-    /// @return A boolean indicating if the user can call the function on the Vault.
-    /// @dev First checks if the user is authorized to call all Vault's with the given function.
-    /// If they are not it then checks if the Vault has a custom Authority. If so it returns whether
-    /// it the user is authorized to call the function, otherwise execution ends and it returns false.
+    /// @return A boolean indicating if the user can call the function on the target.
+    /// @dev First checks whether the target has a custom Authority assigned to it, if so returns
+    /// whether the custom Authority would allow the user to call the desired function on the target,
+    /// otherwise returns whether the user is able to call the desired function on any target contract.
     function canCall(
         address user,
         address target,
         bytes4 functionSig
     ) external view override returns (bool) {
-        // Get the user's role set.
-        bytes32 userRoles = getUserRoles[user];
+        // Get the target's custom Authority. Will be address(0) if none.
+        Authority customAuthority = getTargetCustomAuthority[target];
 
-        // Get the set of roles authorized to call the function.
-        bytes32 rolesAuthorized = getRoleCapabilities[functionSig];
+        // If a custom Authority is set, return whether the Authority allows the user to call the function.
+        if (address(customAuthority) != address(0)) return customAuthority.canCall(user, target, functionSig);
 
-        // Check if the user has an authorized role or is root and return true if so.
-        if (bytes32(0) != userRoles & rolesAuthorized || isUserRoot[user]) return true;
-
-        // Get the target's custom Authority.
-        Authority customAuthority = getCustomAuthority[target];
-
-        // If a custom authority is set, return whether the Authority allows the user to call the function.
-        return address(customAuthority) != address(0) && customAuthority.canCall(user, target, functionSig);
+        // Return whether the user has an authorized role or the capability is publicly accessible.
+        return bytes32(0) != getUserRoles[user] & getRoleCapabilities[functionSig] || isCapabilityPublic[functionSig];
     }
 
     /*///////////////////////////////////////////////////////////////
                CUSTOM TARGET AUTHORITY CONFIGURATION LOGIC
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Emitted when a custom Authority is set for a target.
+    /// @param target The target who had a custom Authority set.
+    /// @param authority The custom Authority set for the target.
+    event TargetCustomAuthorityUpdated(address indexed target, Authority indexed authority);
+
     /// @notice Sets a custom Authority for a target.
     /// @param target The target to set a custom Authority for.
     /// @param customAuthority The custom Authority to set.
     function setTargetCustomAuthority(address target, Authority customAuthority) external requiresAuth {
         // Update the target's custom Authority.
-        getCustomAuthority[target] = customAuthority;
+        getTargetCustomAuthority[target] = customAuthority;
 
         emit TargetCustomAuthorityUpdated(target, customAuthority);
     }
@@ -112,6 +117,12 @@ contract VaultAuthorityModule is Auth, Authority {
     /*///////////////////////////////////////////////////////////////
                   ROLE CAPABILITY CONFIGURATION LOGIC
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emitted when a role's capabilities are updated.
+    /// @param role The role whose capabilities were updated.
+    /// @param functionSig The function the role was enabled to call or not.
+    /// @param enabled Whether the role is now able to call the function or not.
+    event RoleCapabilityUpdated(uint8 indexed role, bytes4 indexed functionSig, bool enabled);
 
     /// @notice Sets a capability for a role.
     /// @param role The role to set a capability for.
@@ -122,23 +133,48 @@ contract VaultAuthorityModule is Auth, Authority {
         bytes4 functionSig,
         bool enabled
     ) external requiresAuth {
-        // Get the previous role capability set.
-        bytes32 lastRoles = getRoleCapabilities[functionSig];
+        // Get the previous set of role capabilities.
+        bytes32 lastCapabilities = getRoleCapabilities[functionSig];
 
         unchecked {
             // Generate a mask for the role.
             bytes32 shifted = bytes32(uint256(uint256(2)**uint256(role)));
 
             // Update the role's capability set with the role mask.
-            getRoleCapabilities[functionSig] = enabled ? lastRoles | shifted : lastRoles & ~shifted;
+            getRoleCapabilities[functionSig] = enabled ? lastCapabilities | shifted : lastCapabilities & ~shifted;
         }
 
         emit RoleCapabilityUpdated(role, functionSig, enabled);
     }
 
     /*///////////////////////////////////////////////////////////////
+                  PUBLIC CAPABILITY CONFIGURATION LOGIC
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emitted when whether a capability is public is updated.
+    /// @param functionSig The function that was made public or not.
+    /// @param enabled Whether the function is not publicly callable or not.
+    event PublicCapabilityUpdated(bytes4 indexed functionSig, bool enabled);
+
+    /// @notice Sets whether a capability is public or not.
+    /// @param functionSig The function make public or not.
+    /// @param enabled Whether the function should be public or not.
+    function setPublicCapability(bytes4 functionSig, bool enabled) external requiresAuth {
+        // Update whether the capability is public.
+        isCapabilityPublic[functionSig] = enabled;
+
+        emit PublicCapabilityUpdated(functionSig, enabled);
+    }
+
+    /*///////////////////////////////////////////////////////////////
                       USER ROLE ASSIGNMENT LOGIC
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Emitted when a user's role is updated.
+    /// @param user The user who had their role updated.
+    /// @param role The role the user had assigned/removed.
+    /// @param enabled Whether the user had the role assigned/removed.
+    event UserRoleUpdated(address indexed user, uint8 indexed role, bool enabled);
 
     /// @notice Assigns a role to a user.
     /// @param user The user to assign a role to.
@@ -161,15 +197,5 @@ contract VaultAuthorityModule is Auth, Authority {
         }
 
         emit UserRoleUpdated(user, role, enabled);
-    }
-
-    /// @notice Sets a user as a root user.
-    /// @param user The user to set as a root user.
-    /// @param enabled Whether the user should be a root user or not.
-    function setRootUser(address user, bool enabled) external requiresAuth {
-        // Update whether the user is a root user.
-        isUserRoot[user] = enabled;
-
-        emit UserRootUpdated(user, enabled);
     }
 }
