@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-pragma solidity 0.8.9;
+pragma solidity 0.8.10;
 
 import {ERC20} from "solmate/tokens/ERC20.sol";
 import {SafeTransferLib} from "solmate/utils/SafeTransferLib.sol";
@@ -7,19 +7,21 @@ import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 
 import {ERC20Strategy} from "../../interfaces/Strategy.sol";
 
-contract MockStrategy is ERC20("Mock cToken Strategy", "cMOCK", 18), ERC20Strategy {
+import "forge-std/console.sol";
+
+contract MockERC20Strategy is ERC20("Mock cERC20 Strategy", "cERC20", 18), ERC20Strategy {
     using SafeTransferLib for ERC20;
     using FixedPointMathLib for uint256;
-
-    /*///////////////////////////////////////////////////////////////
-                           STRATEGY FUNCTIONS
-    //////////////////////////////////////////////////////////////*/
 
     constructor(ERC20 _UNDERLYING) {
         UNDERLYING = _UNDERLYING;
 
         BASE_UNIT = 10**_UNDERLYING.decimals();
     }
+
+    /*///////////////////////////////////////////////////////////////
+                             STRATEGY LOGIC
+    //////////////////////////////////////////////////////////////*/
 
     function isCEther() external pure override returns (bool) {
         return false;
@@ -30,7 +32,7 @@ contract MockStrategy is ERC20("Mock cToken Strategy", "cMOCK", 18), ERC20Strate
     }
 
     function mint(uint256 amount) external override returns (uint256) {
-        _mint(msg.sender, amount.fdiv(exchangeRate(), BASE_UNIT));
+        _mint(msg.sender, amount.mulDivDown(BASE_UNIT, exchangeRate()));
 
         UNDERLYING.safeTransferFrom(msg.sender, address(this), amount);
 
@@ -38,19 +40,19 @@ contract MockStrategy is ERC20("Mock cToken Strategy", "cMOCK", 18), ERC20Strate
     }
 
     function redeemUnderlying(uint256 amount) external override returns (uint256) {
-        _burn(msg.sender, amount.fdiv(exchangeRate(), BASE_UNIT));
+        _burn(msg.sender, amount.mulDivDown(BASE_UNIT, exchangeRate()));
 
         UNDERLYING.safeTransfer(msg.sender, amount);
 
         return 0;
     }
 
-    function balanceOfUnderlying(address user) external view override returns (uint256) {
-        return balanceOf[user].fmul(exchangeRate(), BASE_UNIT);
+    function balanceOfUnderlying(address) external view override returns (uint256) {
+        return UNDERLYING.balanceOf(address(this));
     }
 
     /*///////////////////////////////////////////////////////////////
-                             INTERNAL LOGIC
+                            INTERNAL LOGIC
     //////////////////////////////////////////////////////////////*/
 
     ERC20 internal immutable UNDERLYING;
@@ -62,11 +64,11 @@ contract MockStrategy is ERC20("Mock cToken Strategy", "cMOCK", 18), ERC20Strate
 
         if (cTokenSupply == 0) return BASE_UNIT;
 
-        return UNDERLYING.balanceOf(address(this)).fdiv(cTokenSupply, BASE_UNIT);
+        return UNDERLYING.balanceOf(address(this)).mulDivDown(BASE_UNIT, cTokenSupply);
     }
 
     /*///////////////////////////////////////////////////////////////
-                             MOCK FUNCTIONS
+                              MOCK LOGIC
     //////////////////////////////////////////////////////////////*/
 
     function simulateLoss(uint256 underlyingAmount) external {
